@@ -23,6 +23,9 @@ obsidian_output/
 .env.*
 !.env.example
 
+# Локальное состояние UI (выбранный vault Obsidian, аудиоустройства)
+settings.json
+
 # Личные рабочие файлы (инструкции AI-ассистента, данные этой машины)
 .aiassistant/
 AGENTS.md

@@ -11,6 +11,7 @@ import customtkinter as ctk
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BASE_DIR, MIC_DEVICE, STEREO_MIX_DEVICE, OBSIDIAN_DIR, OLLAMA_MODEL
 from outlook_client import get_current_or_next_meeting_details
+from settings_store import load_settings, save_settings
 from recorder import get_dshow_audio_devices, get_wasapi_audio_render_devices
 
 ctk.set_appearance_mode("System")
@@ -26,7 +27,17 @@ class AppUI(ctk.CTk):
         self.log_queue = log_queue or queue.Queue()
         self.log = logger_callback or print
 
-        self.obsidian_path = OBSIDIAN_DIR or os.path.join(BASE_DIR, "obsidian_output")
+        # Восстановление пользовательских настроек (settings.json), иначе — из .env
+        settings = load_settings()
+        saved_obsidian = settings["obsidian_path"]
+        self.obsidian_path = saved_obsidian or OBSIDIAN_DIR or os.path.join(BASE_DIR, "obsidian_output")
+        self._saved_mic = settings["mic_device"]
+        self._saved_loopback = settings["loopback_device"]
+        if saved_obsidian:
+            if self.worker is not None:
+                self.worker.obsidian_dir = self.obsidian_path
+            if not os.path.isdir(saved_obsidian):
+                self.log(f"[UI Warning] Saved Obsidian path missing: {saved_obsidian}")
         self.all_logs = []
         self.active_tab = "status"
         self.current_outlook_details = None
@@ -43,6 +54,7 @@ class AppUI(ctk.CTk):
         self._build_log_frame()
         self.after(200, self._poll_log_queue)
         self.after(150, self._refresh_devices)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -81,17 +93,19 @@ class AppUI(ctk.CTk):
         frame.pack(padx=20, pady=5, fill="x")
 
         ctk.CTkLabel(frame, text="Микрофон:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
-        self.combo_mic = ctk.CTkComboBox(frame, values=[MIC_DEVICE], width=420)
-        self.combo_mic.set(MIC_DEVICE)
+        self.combo_mic = ctk.CTkComboBox(frame, values=[MIC_DEVICE], width=420,
+                                         command=self._on_device_selected)
+        self.combo_mic.set(self._saved_mic or MIC_DEVICE)
         self.combo_mic.grid(row=1, column=0, padx=10, sticky="ew")
 
         self.btn_refresh_mic = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_devices)
         self.btn_refresh_mic.grid(row=1, column=1, padx=(0, 10))
 
         ctk.CTkLabel(frame, text="Системный звук (loopback):").grid(row=2, column=0, sticky="w", padx=10, pady=(8, 2))
-        self.combo_loopback = ctk.CTkComboBox(frame, values=[STEREO_MIX_DEVICE or ""], width=420)
-        if STEREO_MIX_DEVICE:
-            self.combo_loopback.set(STEREO_MIX_DEVICE)
+        self.combo_loopback = ctk.CTkComboBox(frame, values=[STEREO_MIX_DEVICE or ""], width=420,
+                                              command=self._on_device_selected)
+        if self._saved_loopback or STEREO_MIX_DEVICE:
+            self.combo_loopback.set(self._saved_loopback or STEREO_MIX_DEVICE)
         self.combo_loopback.grid(row=3, column=0, padx=10, sticky="ew")
 
         self.btn_refresh_loop = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_devices)
@@ -151,7 +165,27 @@ class AppUI(ctk.CTk):
             self.obsidian_path = path
             if self.worker is not None:
                 self.worker.obsidian_dir = path
+            self._save_current_settings()
             self.log(f"[UI] Obsidian vault set to: {path}")
+
+    def _on_device_selected(self, _choice=None):
+        """Сохраняет выбор аудиоустройств при выборе из выпадающего списка."""
+        self._saved_mic = self.combo_mic.get().strip()
+        self._saved_loopback = self.combo_loopback.get().strip()
+        self._save_current_settings()
+
+    def _save_current_settings(self):
+        """Сохраняет выбор пользователя (папка Obsidian, устройства) в settings.json."""
+        save_settings(
+            obsidian_path=self.obsidian_path,
+            mic_device=self._saved_mic,
+            loopback_device=self._saved_loopback,
+        )
+
+    def _on_close(self):
+        """Перед выходом фиксирует текущее состояние устройств (в т.ч. ручной ввод)."""
+        self._save_current_settings()
+        self.destroy()
 
     def _fetch_outlook(self):
         self.lbl_outlook_info.configure(text="Поиск встречи в календаре Outlook...")
@@ -187,6 +221,17 @@ class AppUI(ctk.CTk):
         loops = get_wasapi_audio_render_devices() or [STEREO_MIX_DEVICE or ""]
         self.combo_mic.configure(values=mics)
         self.combo_loopback.configure(values=loops)
+
+        # Восстановить сохранённый выбор, если устройство ещё доступно
+        for combo, saved, label, available in (
+            (self.combo_mic, self._saved_mic, "mic", mics),
+            (self.combo_loopback, self._saved_loopback, "loopback", loops),
+        ):
+            if saved and saved in available:
+                combo.set(saved)
+            elif saved:
+                self.log(f"[UI Warning] Saved {label} device not found: {saved}")
+
         self.log(f"[UI] Devices refreshed: {len(mics)} mics, {len(loops)} loopbacks.")
 
     def _start_recording(self):
@@ -205,6 +250,11 @@ class AppUI(ctk.CTk):
                     json.dump(meta, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 self.log(f"[UI Warning] Could not write metadata JSON: {e}")
+
+            # Устройства могли быть введены вручную — фиксируем выбор
+            self._saved_mic = mic
+            self._saved_loopback = loopback
+            self._save_current_settings()
 
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
