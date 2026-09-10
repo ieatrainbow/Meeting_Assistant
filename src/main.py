@@ -9,6 +9,7 @@ from config import LOGS_DIR
 from recorder import AudioRecorder
 from worker import WorkerDaemon
 from ui import AppUI
+from ui_events import to_ui_event
 
 LOG_FILE = os.path.join(LOGS_DIR, "app.log")
 def _ensure_cuda_dll_paths():
@@ -56,7 +57,11 @@ def log_message(msg):
     except Exception:
         pass
 
-    log_queue.put(formatted_msg)
+    # В UI — только короткие понятные события; полный текст остаётся в app.log.
+    ui_text = to_ui_event(msg)
+    if ui_text is not None:
+        ui_time = datetime.datetime.now().strftime("%H:%M:%S")
+        log_queue.put(f"[{ui_time}] {ui_text}")
 
 
 class SafeStreamWriter:
