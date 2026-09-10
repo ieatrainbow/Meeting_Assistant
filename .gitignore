@@ -1,0 +1,34 @@
+# Виртуальное окружение
+venv/
+.venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Рабочие каталоги с личными данными и логами
+inbox/*
+!inbox/.gitkeep
+archive/*
+!archive/.gitkeep
+logs/*
+!logs/.gitkeep
+obsidian_output/
+
+# Конфигурационные файлы с чувствительными данными
+.env
+.env.*
+!.env.example
+
+# Личные рабочие файлы (инструкции AI-ассистента, данные этой машины)
+.aiassistant/
+AGENTS.md
+
+# Файлы IDE и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

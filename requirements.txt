@@ -1,0 +1,10 @@
+requests>=2.31.0
+faster-whisper>=1.0.0
+pywin32>=306
+customtkinter>=5.2.0
+pyaudiowpatch>=0.2.12
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Опционально: очистка VRAM после транскрибации (worker.py переживает отсутствие torch)
+torch>=2.0.0
