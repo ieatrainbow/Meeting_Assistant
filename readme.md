@@ -100,7 +100,7 @@ copy .env.example .env
 
 * `OBSIDIAN_DIR`: Абсолютный путь к целевой папке встреч в вашем Obsidian Vault.
 * `WHISPER_MODEL_SIZE`: Размер модели Faster-Whisper (по умолчанию `large-v3`).
-* `OLLAMA_MODEL`: Имя используемой модели в Ollama (по умолчанию `gemma4-64k-q4:latest`).
+* `OLLAMA_MODEL`: Имя модели Ollama по умолчанию; в интерфейсе можно выбрать любую установленную модель (выбор хранится в `settings.json` и перекрывает `.env`).
 * `MIC_DEVICE` / `STEREO_MIX_DEVICE`: dshow-имена аудиоустройств по умолчанию (в интерфейсе можно выбрать другие).
 * `SUMMARY_PROMPT_TEMPLATE`: Шаблон промпта саммари с плейсхолдерами `{subject}`, `{context}`, `{transcript}`.
 * `ARCHIVE_RETENTION_DAYS`: Срок хранения аудио в `archive/` (по умолчанию 7 дней, 0 — не удалять).

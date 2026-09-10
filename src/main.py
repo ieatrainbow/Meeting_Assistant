@@ -10,6 +10,7 @@ from recorder import AudioRecorder
 from worker import WorkerDaemon
 from ui import AppUI
 from ui_events import to_ui_event
+from settings_store import load_settings
 
 LOG_FILE = os.path.join(LOGS_DIR, "app.log")
 def _ensure_cuda_dll_paths():
@@ -92,7 +93,9 @@ def main():
     log_message("Starting Meeting Assistant...")
 
     recorder = AudioRecorder(logger_callback=log_message)
-    worker = WorkerDaemon(logger_callback=log_message)
+    # Сохранённая модель должна быть известна воркеру ДО старта,
+    # иначе первый прогрев загрузит в VRAM дефолтную модель из .env
+    worker = WorkerDaemon(logger_callback=log_message, ollama_model=load_settings().get("ollama_model") or None)
     worker.start()
 
     # Передаем worker в интерфейс

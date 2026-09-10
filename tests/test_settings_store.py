@@ -62,7 +62,8 @@ class TestSettingsStore(unittest.TestCase):
         self.assertEqual(data["mic_device"], "Mic A")
         save_settings(loopback_device="Speakers")
         self.assertEqual(
-            sorted(load_settings()), ["loopback_device", "mic_device", "obsidian_path"]
+            sorted(load_settings()),
+            ["loopback_device", "mic_device", "obsidian_path", "ollama_model"],
         )
 
     def test_corrupt_file_returns_defaults(self):

@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import sys
+import threading
 import tkinter
 from tkinter import filedialog
 
@@ -33,6 +34,13 @@ class AppUI(ctk.CTk):
         self.obsidian_path = saved_obsidian or OBSIDIAN_DIR or os.path.join(BASE_DIR, "obsidian_output")
         self._saved_mic = settings["mic_device"]
         self._saved_loopback = settings["loopback_device"]
+        self._saved_ollama_model = settings["ollama_model"]
+        if self._saved_ollama_model and self.worker is not None \
+                and getattr(self.worker, "ollama_model", None) != self._saved_ollama_model:
+            if hasattr(self.worker, "set_ollama_model"):
+                self.worker.set_ollama_model(self._saved_ollama_model)
+            else:
+                self.worker.ollama_model = self._saved_ollama_model
         if saved_obsidian:
             if self.worker is not None:
                 self.worker.obsidian_dir = self.obsidian_path
@@ -54,6 +62,7 @@ class AppUI(ctk.CTk):
         self._build_log_frame()
         self.after(200, self._poll_log_queue)
         self.after(150, self._refresh_devices)
+        self.after(150, self._refresh_models)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_header(self):
@@ -110,6 +119,17 @@ class AppUI(ctk.CTk):
 
         self.btn_refresh_loop = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_devices)
         self.btn_refresh_loop.grid(row=3, column=1, padx=(0, 10))
+
+        ctk.CTkLabel(frame, text="Модель Ollama:").grid(row=4, column=0, sticky="w", padx=10, pady=(8, 2))
+        self.combo_model = ctk.CTkComboBox(
+            frame, values=[self._saved_ollama_model or OLLAMA_MODEL], width=420,
+            command=self._on_model_selected
+        )
+        self.combo_model.set(self._saved_ollama_model or OLLAMA_MODEL)
+        self.combo_model.grid(row=5, column=0, padx=10, sticky="ew")
+
+        self.btn_refresh_models = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_models)
+        self.btn_refresh_models.grid(row=5, column=1, padx=(0, 10))
         frame.columnconfigure(0, weight=1)
 
     def _build_control_frame(self):
@@ -174,12 +194,49 @@ class AppUI(ctk.CTk):
         self._saved_loopback = self.combo_loopback.get().strip()
         self._save_current_settings()
 
+    def _on_model_selected(self, _choice=None):
+        """Применяет выбранную модель к воркеру и сохраняет выбор."""
+        model = self.combo_model.get().strip()
+        if not model:
+            return
+        self._saved_ollama_model = model
+        if self.worker is not None and hasattr(self.worker, "set_ollama_model"):
+            self.worker.set_ollama_model(model)
+        self._save_current_settings()
+        self.log(f"[UI] Ollama model selected: {model}")
+
+    def _refresh_models(self):
+        """Запрашивает список установленных моделей Ollama в фоне (HTTP не блокирует UI)."""
+        if self.worker is None or not hasattr(self.worker, "fetch_available_models"):
+            return
+
+        def task():
+            models = self.worker.fetch_available_models()
+            self.after(0, lambda: self._apply_models(models))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _apply_models(self, models):
+        if not models:
+            self.log("[UI Warning] Ollama models list unavailable (server not reachable)")
+            return
+
+        self.combo_model.configure(values=models)
+        current = self.combo_model.get().strip()
+        if current in models:
+            return
+        # Сохранённой/дефолтной модели нет среди установленных — берём первую доступную
+        self.log(f"[UI Warning] Model '{current}' is not installed in Ollama; using '{models[0]}'")
+        self.combo_model.set(models[0])
+        self._on_model_selected(models[0])
+
     def _save_current_settings(self):
-        """Сохраняет выбор пользователя (папка Obsidian, устройства) в settings.json."""
+        """Сохраняет выбор пользователя (папка Obsidian, устройства, модель) в settings.json."""
         save_settings(
             obsidian_path=self.obsidian_path,
             mic_device=self._saved_mic,
             loopback_device=self._saved_loopback,
+            ollama_model=self._saved_ollama_model,
         )
 
     def _on_close(self):

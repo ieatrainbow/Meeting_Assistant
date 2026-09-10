@@ -73,23 +73,25 @@ def transliterate(text):
     return cleaned.strip('_')
 
 class WorkerDaemon(threading.Thread):
-    def __init__(self, logger_callback=None):
+    def __init__(self, logger_callback=None, ollama_model=None):
         super().__init__(daemon=True)
         self.log = logger_callback or print
         self.running = True
         self.current_task = None
         self.queue_files = []
         self.obsidian_dir = OBSIDIAN_DIR
+        # Модель саммаризации: выбор из settings.json/UI, иначе — дефолт из .env
+        self.ollama_model = ollama_model or OLLAMA_MODEL
         self.model_status = "loading"  # loading | ready | unavailable
         self._fail_counts = {}  # попытки обработки файла (защита от зацикливания)
 
     def warmup_ollama(self):
-        self.log(f"[Worker] Preloading Ollama model ({OLLAMA_MODEL}) into VRAM...")
+        self.log(f"[Worker] Preloading Ollama model ({self.ollama_model}) into VRAM...")
         try:
             requests.post(
                 OLLAMA_URL,
                 json={
-                    "model": OLLAMA_MODEL,
+                    "model": self.ollama_model,
                     "prompt": "",
                     "keep_alive": -1,
                     "options": {"num_ctx": OLLAMA_NUM_CTX}
@@ -101,6 +103,46 @@ class WorkerDaemon(threading.Thread):
         except Exception as e:
             self.model_status = "unavailable"
             self.log(f"[Worker Warning] Failed to preload Ollama: {e}")
+
+    def fetch_available_models(self):
+        """Имена моделей, установленных в Ollama (GET /api/tags).
+
+        Возвращает [] при недоступности сервера — UI покажет предупреждение.
+        """
+        # OLLAMA_URL указывает на /api/generate — список моделей лежит рядом, в /api/tags
+        tags_url = OLLAMA_URL.split("/api/")[0] + "/api/tags"
+        try:
+            response = requests.get(tags_url, timeout=5)
+            if response.status_code == 200:
+                return [m["name"] for m in response.json().get("models", []) if m.get("name")]
+            self.log(f"[Worker Warning] Ollama tags HTTP {response.status_code}")
+        except Exception as e:
+            self.log(f"[Worker Warning] Could not list Ollama models: {e}")
+        return []
+
+    def set_ollama_model(self, model_name):
+        """Меняет модель саммаризации и в фоне перезагревает её в VRAM."""
+        model_name = (model_name or "").strip()
+        if not model_name or model_name == self.ollama_model:
+            return
+        previous_model = self.ollama_model
+        self.ollama_model = model_name
+        self.model_status = "loading"
+        self.log(f"[Worker] Ollama model switched to {model_name}; re-warming...")
+        threading.Thread(target=self._rewarm_model, args=(previous_model,), daemon=True).start()
+
+    def _rewarm_model(self, previous_model):
+        # Выгружаем прежнюю модель из VRAM (keep_alive=-1 закреплял её навсегда),
+        # чтобы не держать в памяти две модели одновременно.
+        try:
+            requests.post(
+                OLLAMA_URL,
+                json={"model": previous_model, "prompt": "", "keep_alive": 0},
+                timeout=OLLAMA_WARMUP_TIMEOUT
+            )
+        except Exception:
+            pass
+        self.warmup_ollama()
 
     def save_to_obsidian(self, year_str, month_str, safe_folder_name, raw_subject, date_str, meta, summary, transcript):
         try:
@@ -253,7 +295,7 @@ class WorkerDaemon(threading.Thread):
             self.log("[Worker Warning] No transcript available; archiving without summary.")
 
         if summary is None:
-            self.log(f"[Worker] Generating summary via Ollama ({OLLAMA_MODEL})...")
+            self.log(f"[Worker] Generating summary via Ollama ({self.ollama_model})...")
 
             context_body = meta.get("body", "").strip()
             prompt_context = f"\nОписание встречи из календаря:\n{context_body}\n" if context_body else ""
@@ -268,7 +310,7 @@ class WorkerDaemon(threading.Thread):
                 response = requests.post(
                     OLLAMA_URL,
                     json={
-                        "model": OLLAMA_MODEL,
+                        "model": self.ollama_model,
                         "prompt": prompt,
                         "stream": False,
                         "keep_alive": -1,
