@@ -91,7 +91,8 @@ class TestWorkerLogic(unittest.TestCase):
 
             worker.save_to_obsidian(
                 year_str="2026",
-                month_str="05_May",
+                month_str="09_September",
+                day_str="10",
                 safe_folder_name="2026-05-10_Test_Meeting",
                 raw_subject="Test Meeting",
                 date_str="2026-05-10 10:00",
@@ -101,7 +102,7 @@ class TestWorkerLogic(unittest.TestCase):
             )
 
             expected_path = os.path.join(
-                self.temp_obsidian, "2026", "05_May", "2026-05-10_Test_Meeting.md"
+                self.temp_obsidian, "Meetings", "2026", "09_September", "10", "2026-05-10_Test_Meeting.md"
             )
 
             self.assertTrue(os.path.exists(expected_path))

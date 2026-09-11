@@ -39,18 +39,18 @@ WHISPER_LOG_PROB_THRESHOLD = -1.0
 WHISPER_COMPRESSION_RATIO_THRESHOLD = 2.4
 
 MONTH_NAMES = {
-    1: "01_Jan",
-    2: "02_Feb",
-    3: "03_Mar",
-    4: "04_Apr",
+    1: "01_January",
+    2: "02_February",
+    3: "03_March",
+    4: "04_April",
     5: "05_May",
-    6: "06_Jun",
-    7: "07_Jul",
-    8: "08_Aug",
-    9: "09_Sep",
-    10: "10_Oct",
-    11: "11_Nov",
-    12: "12_Dec"
+    6: "06_June",
+    7: "07_July",
+    8: "08_August",
+    9: "09_September",
+    10: "10_October",
+    11: "11_November",
+    12: "12_December"
 }
 
 def transliterate(text):
@@ -144,12 +144,13 @@ class WorkerDaemon(threading.Thread):
             pass
         self.warmup_ollama()
 
-    def save_to_obsidian(self, year_str, month_str, safe_folder_name, raw_subject, date_str, meta, summary, transcript):
+    def save_to_obsidian(self, year_str, month_str, day_str, safe_folder_name, raw_subject, date_str, meta, summary, transcript):
         try:
             if not self.obsidian_dir:
                 return
 
-            obsidian_target_dir = os.path.join(self.obsidian_dir, year_str, month_str)
+            # Meetings/<год>/<месяц>/<день> — заметки группируются по дате встречи
+            obsidian_target_dir = os.path.join(self.obsidian_dir, "Meetings", year_str, month_str, day_str)
             os.makedirs(obsidian_target_dir, exist_ok=True)
 
             md_filename = f"{safe_folder_name}.md"
@@ -223,6 +224,7 @@ class WorkerDaemon(threading.Thread):
 
         year_str = str(file_date.year)
         month_str = MONTH_NAMES.get(file_date.month, f"{file_date.month:02d}")
+        day_str = file_date.strftime("%d")
         date_formatted = file_date.strftime("%Y-%m-%d %H:%M")
 
         target_dir = os.path.join(ARCHIVE_DIR, year_str, month_str, safe_folder_name)
@@ -350,6 +352,7 @@ class WorkerDaemon(threading.Thread):
         self.save_to_obsidian(
             year_str=year_str,
             month_str=month_str,
+            day_str=day_str,
             safe_folder_name=safe_folder_name,
             raw_subject=raw_subject,
             date_str=date_formatted,
