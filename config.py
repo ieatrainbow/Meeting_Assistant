@@ -56,6 +56,9 @@ WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Запись вс�
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # VAD (Silero): отрезание тишины/шума — main источник галлюцинаций
 WHISPER_VAD_MIN_SILENCE_MS = int(os.getenv("WHISPER_VAD_MIN_SILENCE_MS", "500"))
+# Принудительная нарезка «речевого» куска длиннее N секунд: длинные сплошные
+# фрагменты на тишине/шуме — типичный источник галлюцинаций Whisper
+WHISPER_VAD_MAX_SPEECH_S = float(os.getenv("WHISPER_VAD_MAX_SPEECH_S", "28"))
 
 # ---------------------------------------------------------------------------
 # Саммаризация (Ollama)

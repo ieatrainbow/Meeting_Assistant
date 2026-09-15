@@ -20,6 +20,7 @@ from config import (
     WHISPER_INITIAL_PROMPT,
     WHISPER_BEAM_SIZE,
     WHISPER_VAD_MIN_SILENCE_MS,
+    WHISPER_VAD_MAX_SPEECH_S,
     OLLAMA_URL,
     OLLAMA_MODEL,
     OLLAMA_NUM_CTX,
@@ -37,6 +38,23 @@ from config import (
 WHISPER_NO_SPEECH_THRESHOLD = 0.6
 WHISPER_LOG_PROB_THRESHOLD = -1.0
 WHISPER_COMPRESSION_RATIO_THRESHOLD = 2.4
+
+# Пост-фильтр галлюцинаций Whisper: VAD пропускает куски шума/тишины как речь,
+# и модель выдаёт заученные фразы (заставки YouTube, объявления и т.п.) с
+# высокой уверенностью — пороги no_speech/log_prob их не отсекают. Резервные
+# эвристики: чёрный список фраз + жёсткие метрики уверенности сегмента.
+WHISPER_HALLUCINATION_PATTERNS = (
+    "субтитры делал", "субтитры делaл", "subtitles by", "subtitle",
+    "продолжение следует", "спасибо за просмотр", "благодарю за просмотр",
+    "подписывайтесь на канал", "ставьте лайки", "to be continued",
+    "осторожно, двери закрываются", "осторожно двери закрываются",
+    "американская авиа", "американские авиалинии", "экскурсия по",
+    "thanks for watching", "subscribe to",
+)
+# Сегмент отбрасывается, если no_speech_prob высокий, а модель неуверена
+# (строже, чем встроенные пороги transcribe, которые галлюцинации пропускают)
+WHISPER_SEGMENT_NO_SPEECH_STRICT = 0.5
+WHISPER_SEGMENT_LOG_PROB_STRICT = -0.7
 
 MONTH_NAMES = {
     1: "01_January",
@@ -59,6 +77,24 @@ def sanitize_subject(text):
     cleaned = re.sub(r'[^\w-]', '_', text, flags=re.UNICODE)
     cleaned = re.sub(r'_+', '_', cleaned)
     return cleaned.strip('_')
+
+def is_hallucination(segment):
+    """Эвристика отбраковки сегментов-галлюцинаций Whisper на тишине/шуме.
+
+    1) Текст совпадает с известной фразой-галлюцинацией (lowercase).
+    2) Метрики сегмента «неречевые»: высокий no_speech_prob при низкой
+       уверенности модели (avg_logprob ниже строгого порога).
+    """
+    text = segment.text.strip().lower()
+    if not text:
+        return True
+    for pattern in WHISPER_HALLUCINATION_PATTERNS:
+        if pattern in text:
+            return True
+    if (segment.no_speech_prob > WHISPER_SEGMENT_NO_SPEECH_STRICT
+            and segment.avg_logprob < WHISPER_SEGMENT_LOG_PROB_STRICT):
+        return True
+    return False
 
 class WorkerDaemon(threading.Thread):
     def __init__(self, logger_callback=None, ollama_model=None):
@@ -235,19 +271,38 @@ class WorkerDaemon(threading.Thread):
             # VAD (Silero) отрезает тишину/шум — main источник галлюцинаций;
             # condition_on_previous_text=False не даёт модели «зацикливаться»
             # и тащить выдуманный контекст в следующие сегменты.
+            # max_speech_duration_s режет длинные «речевые» куски: сплошные
+            # фрагменты ~40 c на тишине/шуме — типичное место галлюцинаций.
             segments, _ = whisper_model.transcribe(
                 audio_path,
                 beam_size=WHISPER_BEAM_SIZE,
                 language=WHISPER_LANGUAGE,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=WHISPER_VAD_MIN_SILENCE_MS),
+                vad_parameters=dict(
+                    min_silence_duration_ms=WHISPER_VAD_MIN_SILENCE_MS,
+                    max_speech_duration_s=WHISPER_VAD_MAX_SPEECH_S,
+                ),
                 condition_on_previous_text=False,
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
                 compression_ratio_threshold=WHISPER_COMPRESSION_RATIO_THRESHOLD,
                 initial_prompt=WHISPER_INITIAL_PROMPT,
             )
-            transcript_lines = [f"[{s.start:.1f}s - {s.end:.1f}s] {s.text}" for s in segments]
+            transcript_lines = []
+            filtered_count = 0
+            for s in segments:
+                if is_hallucination(s):
+                    filtered_count += 1
+                    self.log(
+                        f"[Worker] Dropped hallucination-like segment "
+                        f"[{s.start:.1f}s - {s.end:.1f}s] "
+                        f"(no_speech={s.no_speech_prob:.2f}, logprob={s.avg_logprob:.2f}): "
+                        f"{s.text.strip()!r}"
+                    )
+                    continue
+                transcript_lines.append(f"[{s.start:.1f}s - {s.end:.1f}s] {s.text}")
+            if filtered_count:
+                self.log(f"[Worker] Filtered {filtered_count} hallucination-like segment(s).")
             full_transcript = "\n".join(transcript_lines)
 
             self.log(f"[Worker] Transcription complete ({len(full_transcript)} chars).")
