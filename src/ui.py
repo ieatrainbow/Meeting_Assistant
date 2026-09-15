@@ -87,14 +87,20 @@ class AppUI(ctk.CTk):
 
         ctk.CTkLabel(frame, text="Тема встречи:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
         self.entry_subject = ctk.CTkEntry(frame, width=380, placeholder_text="Введите тему или получите из Outlook")
-        self.entry_subject.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10)
+        self.entry_subject.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
 
         self.btn_outlook = ctk.CTkButton(frame, text="Из Outlook", width=120, command=self._fetch_outlook)
-        self.btn_outlook.grid(row=1, column=2, padx=(10, 10), pady=(0, 10))
+        self.btn_outlook.grid(row=1, column=2, padx=(10, 0), pady=(0, 10))
+
+        self.btn_clear_meeting = ctk.CTkButton(
+            frame, text="✕", width=30, state="disabled",
+            command=self._clear_meeting_info
+        )
+        self.btn_clear_meeting.grid(row=1, column=3, padx=(5, 10), pady=(0, 10))
 
         self.lbl_outlook_info = ctk.CTkLabel(frame, text="Встреча из календаря не выбрана.", justify="left",
                                              font=ctk.CTkFont(size=11))
-        self.lbl_outlook_info.grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 10))
+        self.lbl_outlook_info.grid(row=2, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 10))
         frame.columnconfigure(0, weight=1)
 
     def _build_device_frame(self):
@@ -271,7 +277,22 @@ class AppUI(ctk.CTk):
         }
         # Метаданные будут подхвачены воркером после завершения записи
         self._pending_meta = meta
+        self._update_clear_button_state()
         self.log(f"[UI] Outlook meeting loaded: {details.get('subject')}")
+
+    def _update_clear_button_state(self):
+        """Кнопка очистки активна только когда описание встречи получено из Outlook."""
+        has_body = bool((self.current_outlook_details or {}).get("body"))
+        self.btn_clear_meeting.configure(state="normal" if has_body else "disabled")
+
+    def _clear_meeting_info(self):
+        """Очищает тему и данные встречи, полученные из Outlook."""
+        self.current_outlook_details = None
+        self._pending_meta = None
+        self.entry_subject.delete(0, "end")
+        self.lbl_outlook_info.configure(text="Встреча из календаря не выбрана.")
+        self.btn_clear_meeting.configure(state="disabled")
+        self.log("[UI] Meeting info cleared")
 
     def _refresh_devices(self):
         mics = get_dshow_audio_devices() or [MIC_DEVICE]
@@ -325,7 +346,8 @@ class AppUI(ctk.CTk):
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.lbl_rec_status.configure(text="Запись: не активна")
-        self._pending_meta = None
+        # Тема и описание встречи больше не нужны — очищаем после записи
+        self._clear_meeting_info()
 
     # ------------------------------------------------------------------
     # Background UI updates
