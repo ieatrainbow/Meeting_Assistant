@@ -57,6 +57,7 @@ class AppUI(ctk.CTk):
         self._build_header()
         self._build_meeting_frame()
         self._build_device_frame()
+        self._build_tools_frame()
         self._build_control_frame()
         self._build_status_frame()
         self._build_log_frame()
@@ -74,12 +75,6 @@ class AppUI(ctk.CTk):
             font=ctk.CTkFont(size=20, weight="bold")
         )
         self.lbl_title.pack(side="left")
-
-        self.btn_select_obsidian = ctk.CTkButton(
-            header, text="Папка Obsidian...", width=150,
-            command=self._select_obsidian_folder
-        )
-        self.btn_select_obsidian.pack(side="right")
 
     def _build_meeting_frame(self):
         frame = ctk.CTkFrame(self)
@@ -137,6 +132,17 @@ class AppUI(ctk.CTk):
         self.btn_refresh_models = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_models)
         self.btn_refresh_models.grid(row=5, column=1, padx=(0, 10))
         frame.columnconfigure(0, weight=1)
+
+    def _build_tools_frame(self):
+        """Служебные кнопки (папка Obsidian и др.) — отдельный ряд."""
+        frame = ctk.CTkFrame(self)
+        frame.pack(padx=20, pady=5, fill="x")
+
+        self.btn_select_obsidian = ctk.CTkButton(
+            frame, text="Папка Obsidian...", width=150,
+            command=self._select_obsidian_folder
+        )
+        self.btn_select_obsidian.pack(side="left", padx=10, pady=10)
 
     def _build_control_frame(self):
         frame = ctk.CTkFrame(self)

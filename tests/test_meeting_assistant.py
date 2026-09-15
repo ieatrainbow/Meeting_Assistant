@@ -16,25 +16,25 @@ for path in (SRC_DIR, BASE_DIR):
         sys.path.insert(0, path)
 
 import config
-from worker import transliterate, WorkerDaemon
+from worker import sanitize_subject, WorkerDaemon
 from recorder import AudioRecorder
 from outlook_client import clean_meeting_body
 
 
-class TestTransliteration(unittest.TestCase):
-    """Тестирование корректности транслитерации для имен файлов и папок."""
+class TestSanitizeSubject(unittest.TestCase):
+    """Очистка темы встречи для имени файла/папки: кириллица сохраняется."""
 
-    def test_cyrillic_transliteration(self):
-        """Проверка перевода кириллицы в латиницу."""
-        self.assertEqual(transliterate("Обсуждение проекта"), "Obsuzhdenie_proekta")
+    def test_cyrillic_preserved(self):
+        """Кириллица не транслитерируется, пробелы заменяются на '_'."""
+        self.assertEqual(sanitize_subject("Обсуждение проекта"), "Обсуждение_проекта")
 
     def test_special_characters(self):
         """Проверка очистки спецсимволов и лишних подчеркиваний."""
-        self.assertEqual(transliterate("QA отдел / Sync!@#"), "QA_otdel_Sync")
+        self.assertEqual(sanitize_subject("QA отдел / Sync!@#"), "QA_отдел_Sync")
 
     def test_mixed_text(self):
         """Проверка обработки смешанного англо-русского текста с дефисами."""
-        self.assertEqual(transliterate("Meeting 123 - Важно"), "Meeting_123_-_Vazhno")
+        self.assertEqual(sanitize_subject("Meeting 123 - Важно"), "Meeting_123_-_Важно")
 
 
 class TestCleanMeetingBody(unittest.TestCase):
