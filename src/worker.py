@@ -1,18 +1,25 @@
 import datetime
 import gc
 import json
+import math
 import os
 import re
 import shutil
 import threading
 import time
+import wave
 import requests
+
+import numpy as np
 
 from config import (
     INBOX_DIR,
     ARCHIVE_DIR,
     OBSIDIAN_DIR,
     AUDIO_EXTENSIONS,
+    SPEAKER_SELF_NAME,
+    SPEAKER_TRACK_SUFFIXES,
+    TARGET_SAMPLE_RATE,
     WHISPER_MODEL_SIZE,
     WHISPER_DEVICE,
     WHISPER_COMPUTE_TYPE,
@@ -56,6 +63,14 @@ WHISPER_HALLUCINATION_PATTERNS = (
 WHISPER_SEGMENT_NO_SPEECH_STRICT = 0.5
 WHISPER_SEGMENT_LOG_PROB_STRICT = -0.7
 
+# Атрибуция говорящих по sidecar-дорожке (recorder пишет <имя>_mic.wav рядом
+# с миксом). Энергия «второго» канала восстанавливается вычитанием:
+# loop = 2*mix - mic. Говорящий считается единственным, если его дорожка
+# громче другой более чем на SPEAKER_DOMINANCE_DB дБ в окне сегмента.
+SPEAKER_DOMINANCE_DB = 3.0
+# Ниже этой амплитуды (RMS) оба канала считаются тишиной — метка не ставится
+SPEAKER_SILENCE_FLOOR = 1e-4
+
 MONTH_NAMES = {
     1: "01_January",
     2: "02_February",
@@ -96,6 +111,86 @@ def is_hallucination(segment):
         return True
     return False
 
+def _find_speaker_track(audio_path):
+    """Путь к sidecar-дорожке говорящего рядом с миксом, если она есть."""
+    base = os.path.splitext(audio_path)[0]
+    for suffix in SPEAKER_TRACK_SUFFIXES:
+        candidate = base + suffix
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+def _load_wav_float(path):
+    """Загружает WAV 16 kHz mono int16 как float32 numpy. None при ошибке."""
+    try:
+        with wave.open(path, 'rb') as wf:
+            frames = wf.getnframes()
+            raw = wf.readframes(frames)
+            channels = wf.getnchannels()
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+        if channels > 1:
+            samples = samples.reshape(-1, channels).mean(axis=1)
+        return samples
+    except Exception:
+        return None
+
+def _speaker_label(start_s, end_s, main_audio, sidecar_audio, sidecar_is_mic, self_name="Я"):
+    """Метка говорящего для сегмента [start_s, end_s] по энергиям дорожек.
+
+    main_audio — микс (mic+loopback)/2, sidecar_audio — «сырая» дорожка
+    микрофона (или loopback, если микрофон не писался). Энергия второго
+    канала восстанавливается: loop = 2*mix - mic. self_name — метка владельца
+    микрофона. Возвращает self_name, 'Собеседник', их комбинацию или ''
+    (тишина/нет данных).
+    """
+    if main_audio is None or sidecar_audio is None:
+        return ""
+    sr = TARGET_SAMPLE_RATE
+    a = max(0, int(start_s * sr))
+    b = min(len(main_audio), int(end_s * sr), len(sidecar_audio))
+    if b <= a:
+        return ""
+
+    win_main = main_audio[a:b]
+    win_side = sidecar_audio[a:b]
+    # Микс из одной дорожки (recorder пишет sidecar == микс): второй канал
+    # отсутствует, вся речь принадлежит владельцу sidecar-дорожки
+    if np.allclose(win_main, win_side, atol=1e-4):
+        if float(np.sqrt(np.mean(win_side ** 2))) < SPEAKER_SILENCE_FLOOR:
+            return ""
+        return self_name if sidecar_is_mic else "Собеседник"
+    # Вычитание может дать отрицательный шум — обрезаем в 0
+    e_side = float(np.sqrt(np.mean(win_side ** 2)))
+    other = np.clip(win_main * 2.0 - win_side, 0.0, None)
+    e_other = float(np.sqrt(np.mean(other ** 2)))
+
+    if e_side < SPEAKER_SILENCE_FLOOR and e_other < SPEAKER_SILENCE_FLOOR:
+        return ""
+    if e_other < SPEAKER_SILENCE_FLOOR:
+        return self_name if sidecar_is_mic else "Собеседник"
+    if e_side < SPEAKER_SILENCE_FLOOR:
+        return "Собеседник" if sidecar_is_mic else self_name
+
+    eps = 1e-9
+    ratio_db = 10.0 * math.log10((e_side + eps) / (e_other + eps))
+    mic_db = ratio_db if sidecar_is_mic else -ratio_db
+    if mic_db > SPEAKER_DOMINANCE_DB:
+        return self_name
+    if mic_db < -SPEAKER_DOMINANCE_DB:
+        return "Собеседник"
+    return f"{self_name} + Собеседник"
+
+def _remove_speaker_track(audio_path):
+    """Удаляет sidecar-дорожки после обработки микса (больше не нужны)."""
+    base = os.path.splitext(audio_path)[0]
+    for suffix in SPEAKER_TRACK_SUFFIXES:
+        sidecar_path = base + suffix
+        if os.path.exists(sidecar_path):
+            try:
+                os.remove(sidecar_path)
+            except OSError as e:
+                print(f"[Worker Warning] Could not remove speaker track: {e}")
+
 class WorkerDaemon(threading.Thread):
     def __init__(self, logger_callback=None, ollama_model=None):
         super().__init__(daemon=True)
@@ -108,6 +203,8 @@ class WorkerDaemon(threading.Thread):
         self.ollama_model = ollama_model or OLLAMA_MODEL
         self.model_status = "loading"  # loading | ready | unavailable
         self._fail_counts = {}  # попытки обработки файла (защита от зацикливания)
+        # Имя владельца микрофона в транскрипте; UI перекрывает из settings.json
+        self.speaker_self_name = SPEAKER_SELF_NAME
 
     def warmup_ollama(self):
         self.log(f"[Worker] Preloading Ollama model ({self.ollama_model}) into VRAM...")
@@ -256,6 +353,19 @@ class WorkerDaemon(threading.Thread):
 
         self.log(f"[Worker] Processing meeting: {safe_folder_name}")
 
+        # Sidecar-дорожка говорящего: грузим до транскрибации (для атрибуции
+        # «Я / Собеседник»); нет или битая — сегменты идут без меток.
+        sidecar_path = _find_speaker_track(audio_path)
+        sidecar_audio = _load_wav_float(sidecar_path) if sidecar_path else None
+        sidecar_is_mic = bool(sidecar_path) and sidecar_path.endswith("_mic.wav")
+        main_audio = None
+        if sidecar_audio is not None:
+            main_audio = _load_wav_float(audio_path)
+            if main_audio is None:
+                self.log(f"[Worker Warning] Could not load mix for speaker attribution: {filename_full}")
+            else:
+                self.log(f"[Worker] Speaker attribution enabled ({os.path.basename(sidecar_path)}).")
+
         # 1. Транскрибация Whisper
         full_transcript = ""
         summary = None
@@ -300,7 +410,12 @@ class WorkerDaemon(threading.Thread):
                         f"{s.text.strip()!r}"
                     )
                     continue
-                transcript_lines.append(f"[{s.start:.1f}s - {s.end:.1f}s] {s.text}")
+                label = _speaker_label(
+                    s.start, s.end, main_audio, sidecar_audio,
+                    sidecar_is_mic, self_name=self.speaker_self_name
+                )
+                prefix = f"{label}: " if label else ""
+                transcript_lines.append(f"[{s.start:.1f}s - {s.end:.1f}s] {prefix}{s.text}")
             if filtered_count:
                 self.log(f"[Worker] Filtered {filtered_count} hallucination-like segment(s).")
             full_transcript = "\n".join(transcript_lines)
@@ -326,10 +441,15 @@ class WorkerDaemon(threading.Thread):
                 self.log(f"[Worker Warning] Giving up after {MAX_TRANSCRIBE_RETRIES} attempts; archiving as failed.")
                 full_transcript = ""
                 summary = "Ошибка транскрибации."
+                _remove_speaker_track(audio_path)
             else:
+                # Sidecar оставляем — понадобится на следующей попытке
                 self.current_task = None
                 time.sleep(5)
                 return
+        else:
+            # Транскрибация удалась: sidecar-дорожка больше не нужна
+            _remove_speaker_track(audio_path)
 
         # 2. Генерация Саммари Ollama
         if not full_transcript.strip() and summary is None:
@@ -439,10 +559,24 @@ class WorkerDaemon(threading.Thread):
                 if os.path.exists(INBOX_DIR):
                     files = os.listdir(INBOX_DIR)
 
+                    # Осиротевшие sidecar-дорожки (микс уже удалён/обработан) — в мусор
+                    for f in files:
+                        if f.endswith(tuple(SPEAKER_TRACK_SUFFIXES)):
+                            base = os.path.splitext(f)[0]
+                            if not any(os.path.exists(os.path.join(INBOX_DIR, base + ext))
+                                       for ext in AUDIO_EXTENSIONS):
+                                try:
+                                    os.remove(os.path.join(INBOX_DIR, f))
+                                    self.log(f"[Cleanup] Removed orphaned speaker track: {f}")
+                                except OSError as e:
+                                    self.log(f"[Cleanup Error] {f}: {e}")
+
+                    # Sidecar-дорожки в очередь на транскрибацию не попадают
                     audio_files = [
                         os.path.join(INBOX_DIR, f) for f in files
                         if f.lower().endswith(tuple(AUDIO_EXTENSIONS))
                            and not f.endswith('.tmp')
+                           and not f.endswith(tuple(SPEAKER_TRACK_SUFFIXES))
                     ]
 
                     audio_files.sort(key=lambda x: os.path.getmtime(x))

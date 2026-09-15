@@ -8,7 +8,7 @@ import numpy as np
 import pyaudiowpatch as pyaudio
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import INBOX_DIR, MIC_DEVICE, STEREO_MIX_DEVICE, TARGET_SAMPLE_RATE
+from config import INBOX_DIR, MIC_DEVICE, SPEAKER_TRACK_SUFFIXES, STEREO_MIX_DEVICE, TARGET_SAMPLE_RATE
 
 TARGET_RATE = TARGET_SAMPLE_RATE  # Частота дискретизации итогового файла
 
@@ -227,12 +227,22 @@ class AudioRecorder:
                 self.is_recording = False
                 return
 
-            # Микширование: выравниваем по длине, усредняем активные каналы
+            # Микширование: выравниваем по длине, усредняем активные каналы.
+            # Sidecar — нетранскрибированная дорожка микрофона (или loopback,
+            # если микрофона не было) той же длины, что микс: worker использует
+            # её для атрибуции сегментов «Я / Собеседник». При одном активном
+            # канале sidecar == микс: вычитание в worker даст нулевую энергию
+            # второго канала, и все сегменты получат метку этого канала.
             if len(mic) and len(loop):
                 n = min(len(mic), len(loop))
                 mixed = (mic[:n] + loop[:n]) / 2.0
+                sidecar, sidecar_role = mic[:n], SPEAKER_TRACK_SUFFIXES[0]
+            elif len(mic):
+                mixed = mic
+                sidecar, sidecar_role = mic, SPEAKER_TRACK_SUFFIXES[0]
             else:
-                mixed = mic if len(mic) else loop
+                mixed = loop
+                sidecar, sidecar_role = loop, SPEAKER_TRACK_SUFFIXES[1]
             mixed = np.clip(mixed, -1.0, 1.0)
 
             pcm = (mixed * 32767.0).astype(np.int16)
@@ -248,6 +258,19 @@ class AudioRecorder:
             if os.path.exists(final_path):
                 os.remove(final_path)
             os.replace(path, final_path)
+
+            # Sidecar пишется под финальным именем (worker не берёт его в очередь)
+            try:
+                sidecar_path = os.path.splitext(final_path)[0] + sidecar_role
+                sidecar_pcm = (np.clip(sidecar, -1.0, 1.0) * 32767.0).astype(np.int16)
+                with wave.open(sidecar_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(TARGET_RATE)
+                    wf.writeframes(sidecar_pcm.tobytes())
+                self.log(f"[Recorder] Speaker track saved: {os.path.basename(sidecar_path)}")
+            except Exception as e:
+                self.log(f"[Recorder Warning] Speaker track not saved: {e}")
 
             self.log(f"[Recorder] Recording saved: {os.path.basename(final_path)}")
         except Exception as e:

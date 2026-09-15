@@ -10,7 +10,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BASE_DIR, MIC_DEVICE, STEREO_MIX_DEVICE, OBSIDIAN_DIR, OLLAMA_MODEL
+from config import BASE_DIR, MIC_DEVICE, SPEAKER_SELF_NAME, STEREO_MIX_DEVICE, OBSIDIAN_DIR, OLLAMA_MODEL
 from outlook_client import get_current_or_next_meeting_details
 from settings_store import load_settings, save_settings
 from recorder import get_dshow_audio_devices, get_wasapi_audio_render_devices
@@ -35,6 +35,9 @@ class AppUI(ctk.CTk):
         self._saved_mic = settings["mic_device"]
         self._saved_loopback = settings["loopback_device"]
         self._saved_ollama_model = settings["ollama_model"]
+        self._saved_speaker_name = settings["speaker_self_name"] or SPEAKER_SELF_NAME
+        if self.worker is not None:
+            self.worker.speaker_self_name = self._saved_speaker_name
         if self._saved_ollama_model and self.worker is not None \
                 and getattr(self.worker, "ollama_model", None) != self._saved_ollama_model:
             if hasattr(self.worker, "set_ollama_model"):
@@ -144,6 +147,12 @@ class AppUI(ctk.CTk):
         )
         self.btn_select_obsidian.pack(side="left", padx=10, pady=10)
 
+        # Метка владельца микрофона в транскрипте (атрибуция говорящих)
+        ctk.CTkLabel(frame, text="Имя в транскрипте:").pack(side="left", padx=(10, 5), pady=10)
+        self.entry_speaker_name = ctk.CTkEntry(frame, width=120, placeholder_text=SPEAKER_SELF_NAME)
+        self.entry_speaker_name.insert(0, self._saved_speaker_name)
+        self.entry_speaker_name.pack(side="left", padx=(0, 10), pady=10)
+
     def _build_control_frame(self):
         frame = ctk.CTkFrame(self)
         frame.pack(padx=20, pady=5, fill="x")
@@ -244,11 +253,17 @@ class AppUI(ctk.CTk):
 
     def _save_current_settings(self):
         """Сохраняет выбор пользователя (папка Obsidian, устройства, модель) в settings.json."""
+        speaker_name = self.entry_speaker_name.get().strip() if hasattr(self, "entry_speaker_name") else ""
+        if speaker_name:
+            self._saved_speaker_name = speaker_name
+            if self.worker is not None:
+                self.worker.speaker_self_name = speaker_name
         save_settings(
             obsidian_path=self.obsidian_path,
             mic_device=self._saved_mic,
             loopback_device=self._saved_loopback,
             ollama_model=self._saved_ollama_model,
+            speaker_self_name=self._saved_speaker_name,
         )
 
     def _on_close(self):

@@ -6,7 +6,7 @@
 import json
 import os
 
-from config import BASE_DIR
+from config import BASE_DIR, SPEAKER_SELF_NAME
 
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
@@ -16,6 +16,7 @@ DEFAULTS = {
     "mic_device": "",
     "loopback_device": "",
     "ollama_model": "",
+    "speaker_self_name": SPEAKER_SELF_NAME,
 }
 
 

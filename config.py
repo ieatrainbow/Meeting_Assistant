@@ -32,6 +32,15 @@ if not os.path.exists(OBSIDIAN_DIR):
 # Частота дискретизации итогового файла
 TARGET_SAMPLE_RATE = int(os.getenv("TARGET_SAMPLE_RATE", "16000"))
 
+# Sidecar-дорожка для атрибуции говорящих: recorder пишет рядом с миксом
+# <имя>_mic.wav (сырой микрофон), либо <имя>_loop.wav, если микрофон не писался.
+# worker использует её для разметки сегментов «Я / Собеседник».
+SPEAKER_TRACK_SUFFIXES = ("_mic.wav", "_loop.wav")
+
+# Имя владельца микрофона в транскрипте (метка «Я» по умолчанию).
+# Перекрывается настройкой speaker_self_name из settings.json (UI).
+SPEAKER_SELF_NAME = os.getenv("SPEAKER_SELF_NAME", "Вы")
+
 # Расширения обрабатываемых аудиофайлов (через запятую в .env)
 AUDIO_EXTENSIONS = tuple(
     "." + ext.strip().lower().lstrip(".")
