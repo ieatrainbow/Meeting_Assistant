@@ -34,6 +34,8 @@ from config import (
     OLLAMA_WARMUP_TIMEOUT,
     OLLAMA_TIMEOUT,
     SUMMARY_PROMPT_TEMPLATE,
+    SUMMARY_DOMAIN_CONTEXT,
+    SUMMARY_CONTEXT_MAX_CHARS,
     WORKER_POLL_INTERVAL,
     WORKER_CLEANUP_INTERVAL_HOURS,
     ARCHIVE_RETENTION_DAYS,
@@ -92,6 +94,23 @@ def sanitize_subject(text):
     cleaned = re.sub(r'[^\w-]', '_', text, flags=re.UNICODE)
     cleaned = re.sub(r'_+', '_', cleaned)
     return cleaned.strip('_')
+
+def prepare_calendar_context(body, max_chars=SUMMARY_CONTEXT_MAX_CHARS):
+    """Подготовка описания встречи из календаря для промпта саммари.
+
+    Ссылки заменяются плейсхолдером (в описаниях календаря встречаются
+    Teams/Zoom-ссылки и «простыни» приглашений — модели в саммари они не
+    нужны), цепочки пустых строк сжимаются, текст усекается до max_chars,
+    чтобы длинное описание не вытеснило транскрипт из контекста Ollama.
+    """
+    text = (body or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?:https?://|www\.)\S+", "[ссылка]", text, flags=re.IGNORECASE)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + " …[усечено]"
+    return text
 
 def is_hallucination(segment):
     """Эвристика отбраковки сегментов-галлюцинаций Whisper на тишине/шуме.
@@ -192,7 +211,8 @@ def _remove_speaker_track(audio_path):
                 print(f"[Worker Warning] Could not remove speaker track: {e}")
 
 class WorkerDaemon(threading.Thread):
-    def __init__(self, logger_callback=None, ollama_model=None):
+    def __init__(self, logger_callback=None, ollama_model=None,
+                 whisper_initial_prompt=None, summary_domain_context=None):
         super().__init__(daemon=True)
         self.log = logger_callback or print
         self.running = True
@@ -205,6 +225,10 @@ class WorkerDaemon(threading.Thread):
         self._fail_counts = {}  # попытки обработки файла (защита от зацикливания)
         # Имя владельца микрофона в транскрипте; UI перекрывает из settings.json
         self.speaker_self_name = SPEAKER_SELF_NAME
+        # Подсказка Whisper и контекст домена саммари: выбор из settings.json/UI,
+        # иначе — дефолты из .env
+        self.whisper_initial_prompt = (whisper_initial_prompt or "").strip() or WHISPER_INITIAL_PROMPT
+        self.summary_domain_context = (summary_domain_context or "").strip() or SUMMARY_DOMAIN_CONTEXT
 
     def warmup_ollama(self):
         self.log(f"[Worker] Preloading Ollama model ({self.ollama_model}) into VRAM...")
@@ -396,7 +420,7 @@ class WorkerDaemon(threading.Thread):
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
                 compression_ratio_threshold=WHISPER_COMPRESSION_RATIO_THRESHOLD,
-                initial_prompt=WHISPER_INITIAL_PROMPT,
+                initial_prompt=self.whisper_initial_prompt,
             )
             transcript_lines = []
             filtered_count = 0
@@ -462,14 +486,25 @@ class WorkerDaemon(threading.Thread):
         if summary is None:
             self.log(f"[Worker] Generating summary via Ollama ({self.ollama_model})...")
 
-            context_body = meta.get("body", "").strip()
-            prompt_context = f"\nОписание встречи из календаря:\n{context_body}\n" if context_body else ""
+            context_body = prepare_calendar_context(meta.get("body", ""))
+            if context_body:
+                prompt_context = (
+                    "\nОписание встречи из календаря (справочная информация: "
+                    "используй только для понимания контекста, НЕ добавляй в "
+                    "саммари факты, которые не прозвучали во встрече):\n"
+                    f"{context_body}\n"
+                )
+            else:
+                prompt_context = ""
 
             prompt = SUMMARY_PROMPT_TEMPLATE.format(
                 subject=raw_subject,
                 context=prompt_context,
                 transcript=full_transcript,
             )
+            # Общая тема встреч (контекст домена) — первой строкой промпта
+            if self.summary_domain_context:
+                prompt = f"Общий контекст: {self.summary_domain_context}.\n" + prompt
 
             try:
                 response = requests.post(

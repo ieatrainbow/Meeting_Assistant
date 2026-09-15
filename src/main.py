@@ -93,9 +93,15 @@ def main():
     log_message("Starting Meeting Assistant...")
 
     recorder = AudioRecorder(logger_callback=log_message)
-    # Сохранённая модель должна быть известна воркеру ДО старта,
+    # Сохранённые настройки должны быть известны воркеру ДО старта,
     # иначе первый прогрев загрузит в VRAM дефолтную модель из .env
-    worker = WorkerDaemon(logger_callback=log_message, ollama_model=load_settings().get("ollama_model") or None)
+    _settings = load_settings()
+    worker = WorkerDaemon(
+        logger_callback=log_message,
+        ollama_model=_settings.get("ollama_model") or None,
+        whisper_initial_prompt=_settings.get("whisper_initial_prompt") or None,
+        summary_domain_context=_settings.get("summary_domain_context") or None,
+    )
     worker.start()
 
     # Передаем worker в интерфейс

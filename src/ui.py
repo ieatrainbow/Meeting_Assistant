@@ -10,7 +10,11 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BASE_DIR, MIC_DEVICE, SPEAKER_SELF_NAME, STEREO_MIX_DEVICE, OBSIDIAN_DIR, OLLAMA_MODEL
+from config import (
+    BASE_DIR, MIC_DEVICE, SPEAKER_SELF_NAME, STEREO_MIX_DEVICE, OBSIDIAN_DIR,
+    OLLAMA_MODEL, WHISPER_INITIAL_PROMPT, SUMMARY_DOMAIN_CONTEXT,
+    WHISPER_PROMPT_MAX_CHARS, SUMMARY_DOMAIN_MAX_CHARS, SPEAKER_NAME_MAX_CHARS,
+)
 from outlook_client import get_current_or_next_meeting_details
 from settings_store import load_settings, save_settings
 from recorder import get_dshow_audio_devices, get_wasapi_audio_render_devices
@@ -36,6 +40,8 @@ class AppUI(ctk.CTk):
         self._saved_loopback = settings["loopback_device"]
         self._saved_ollama_model = settings["ollama_model"]
         self._saved_speaker_name = settings["speaker_self_name"] or SPEAKER_SELF_NAME
+        self._saved_whisper_prompt = settings["whisper_initial_prompt"]
+        self._saved_summary_context = settings["summary_domain_context"]
         if self.worker is not None:
             self.worker.speaker_self_name = self._saved_speaker_name
         if self._saved_ollama_model and self.worker is not None \
@@ -54,12 +60,13 @@ class AppUI(ctk.CTk):
         self.current_outlook_details = None
 
         self.title("Meeting Assistant")
-        self.geometry("680x760")
+        self.geometry("680x880")
         self.resizable(False, False)
 
         self._build_header()
         self._build_meeting_frame()
         self._build_device_frame()
+        self._build_model_frame()
         self._build_tools_frame()
         self._build_control_frame()
         self._build_status_frame()
@@ -122,36 +129,132 @@ class AppUI(ctk.CTk):
         self.combo_loopback.grid(row=3, column=0, padx=10, sticky="ew")
 
         self.btn_refresh_loop = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_devices)
-        self.btn_refresh_loop.grid(row=3, column=1, padx=(0, 10))
-
-        ctk.CTkLabel(frame, text="Модель Ollama:").grid(row=4, column=0, sticky="w", padx=10, pady=(8, 2))
-        self.combo_model = ctk.CTkComboBox(
-            frame, values=[self._saved_ollama_model or OLLAMA_MODEL], width=420,
-            command=self._on_model_selected
-        )
-        self.combo_model.set(self._saved_ollama_model or OLLAMA_MODEL)
-        self.combo_model.grid(row=5, column=0, padx=10, sticky="ew")
-
-        self.btn_refresh_models = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_models)
-        self.btn_refresh_models.grid(row=5, column=1, padx=(0, 10))
+        self.btn_refresh_loop.grid(row=3, column=1, padx=(0, 10), pady=(0, 10))
         frame.columnconfigure(0, weight=1)
 
-    def _build_tools_frame(self):
-        """Служебные кнопки (папка Obsidian и др.) — отдельный ряд."""
+    def _build_model_frame(self):
+        """Модель Ollama — отдельный блок под настройками звука."""
         frame = ctk.CTkFrame(self)
         frame.pack(padx=20, pady=5, fill="x")
 
+        ctk.CTkLabel(frame, text="Модель Ollama:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
+        self.combo_model = ctk.CTkComboBox(
+            frame, values=[self._saved_ollama_model or OLLAMA_MODEL],
+            command=self._on_model_selected
+        )
+        self.combo_model.set(self._saved_ollama_model or OLLAMA_MODEL)
+        self.combo_model.grid(row=1, column=0, padx=10, sticky="ew", pady=(0, 10))
+
+        self.btn_refresh_models = ctk.CTkButton(frame, text="↻", width=30, command=self._refresh_models)
+        self.btn_refresh_models.grid(row=1, column=1, padx=(0, 10), pady=(0, 10))
+        frame.columnconfigure(0, weight=1)
+
+    def _open_prompt_dialog(self, kind):
+        """Окно редактирования промпта: textarea, счётчик символов, Сохранить/Отмена.
+
+        При открытии подставляется текущее значение (пользовательская настройка
+        или дефолт из config/.env). Очистка поля при сохранении = сброс к дефолту.
+        """
+        if kind == "whisper":
+            title = "Подсказка Whisper (initial prompt)"
+            max_chars = WHISPER_PROMPT_MAX_CHARS
+            default = WHISPER_INITIAL_PROMPT
+            current = self._saved_whisper_prompt or default
+        else:
+            title = "Общая тема для саммари (контекст домена)"
+            max_chars = SUMMARY_DOMAIN_MAX_CHARS
+            default = SUMMARY_DOMAIN_CONTEXT
+            current = self._saved_summary_context or default
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("600x340")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+
+        ctk.CTkLabel(
+            dialog,
+            text=(f"Дефолт: {default}\n"
+                  f"Пустое поле при сохранении = возврат к дефолту. Лимит: {max_chars} символов."),
+            justify="left", wraplength=560, font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+
+        txt = ctk.CTkTextbox(dialog, wrap="word")
+        txt.pack(fill="both", expand=True, padx=10, pady=5)
+        txt.insert("1.0", current)
+
+        lbl_counter = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
+        lbl_counter.pack(anchor="w", padx=10)
+
+        def update_counter(_event=None):
+            length = len(txt.get("1.0", "end-1c").strip())
+            lbl_counter.configure(
+                text=f"{length} / {max_chars}",
+                text_color="#b03a3a" if length > max_chars else None,
+            )
+
+        txt.bind("<KeyRelease>", update_counter)
+        update_counter()
+
+        def save():
+            text = txt.get("1.0", "end-1c").strip()
+            if len(text) > max_chars:
+                text = text[:max_chars].rstrip()
+            # Промпты однострочные по смыслу — переносы схлопываем в пробелы
+            text = " ".join(text.split())
+            if kind == "whisper":
+                self._saved_whisper_prompt = text
+                if self.worker is not None:
+                    self.worker.whisper_initial_prompt = text or WHISPER_INITIAL_PROMPT
+            else:
+                self._saved_summary_context = text
+                if self.worker is not None:
+                    self.worker.summary_domain_context = text or SUMMARY_DOMAIN_CONTEXT
+            self._save_current_settings()
+            dialog.destroy()
+            self.log(f"[UI] Prompt saved: {title} ({len(text)} chars)")
+
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(btns, text="Сохранить", width=110, command=save).pack(side="right")
+        ctk.CTkButton(btns, text="Отмена", width=90, fg_color="gray", hover_color="darkgray",
+                      command=dialog.destroy).pack(side="right", padx=(0, 8))
+
+        # grab после отрисовки окна, иначе Tk может отказать («not viewable»)
+        dialog.after(100, dialog.grab_set)
+
+    def _build_tools_frame(self):
+        """Служебные кнопки (папка Obsidian, промпты, имя в транскрипте).
+
+        Кнопки в 2×2 сетке, тянутся по ширине — ряды визуально ровные.
+        """
+        frame = ctk.CTkFrame(self)
+        frame.pack(padx=20, pady=5, fill="x")
+
+        # Промпты и имя говорящего — редактируются в отдельных окнах
         self.btn_select_obsidian = ctk.CTkButton(
-            frame, text="Папка Obsidian...", width=150,
+            frame, text="Папка Obsidian...",
             command=self._select_obsidian_folder
         )
-        self.btn_select_obsidian.pack(side="left", padx=10, pady=10)
+        self.btn_select_obsidian.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
 
-        # Метка владельца микрофона в транскрипте (атрибуция говорящих)
-        ctk.CTkLabel(frame, text="Имя в транскрипте:").pack(side="left", padx=(10, 5), pady=10)
-        self.entry_speaker_name = ctk.CTkEntry(frame, width=120, placeholder_text=SPEAKER_SELF_NAME)
-        self.entry_speaker_name.insert(0, self._saved_speaker_name)
-        self.entry_speaker_name.pack(side="left", padx=(0, 10), pady=10)
+        self.btn_whisper_prompt = ctk.CTkButton(
+            frame, text="Подсказка Whisper...",
+            command=lambda: self._open_prompt_dialog("whisper"))
+        self.btn_whisper_prompt.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
+
+        self.btn_summary_context = ctk.CTkButton(
+            frame, text="Тема саммари...",
+            command=lambda: self._open_prompt_dialog("summary"))
+        self.btn_summary_context.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        self.btn_speaker_name = ctk.CTkButton(
+            frame, text="Имя в транскрипте...",
+            command=self._open_name_dialog)
+        self.btn_speaker_name.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 10))
+
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
 
     def _build_control_frame(self):
         frame = ctk.CTkFrame(self)
@@ -199,6 +302,45 @@ class AppUI(ctk.CTk):
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
+
+    def _open_name_dialog(self):
+        """Окно ввода имени владельца микрофона в транскрипте (метка «Я»)."""
+        default = SPEAKER_SELF_NAME
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Имя в транскрипте (владелец микрофона)")
+        dialog.geometry("460x190")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+
+        ctk.CTkLabel(
+            dialog,
+            text=(f"Метка владельца микрофона в расшифровке. Дефолт: {default}.\n"
+                  "Пустое значение при сохранении = возврат к дефолту."),
+            justify="left", wraplength=420, font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+
+        entry = ctk.CTkEntry(dialog, width=420)
+        entry.insert(0, self._saved_speaker_name or default)
+        entry.pack(padx=10, pady=5)
+
+        def save():
+            text = " ".join(entry.get().split())[:SPEAKER_NAME_MAX_CHARS]
+            self._saved_speaker_name = text or default
+            if self.worker is not None:
+                self.worker.speaker_self_name = self._saved_speaker_name
+            self._save_current_settings()
+            dialog.destroy()
+            self.log(f"[UI] Speaker name saved: {self._saved_speaker_name}")
+
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=(5, 10))
+        ctk.CTkButton(btns, text="Сохранить", width=110, command=save).pack(side="right")
+        ctk.CTkButton(btns, text="Отмена", width=90, fg_color="gray", hover_color="darkgray",
+                      command=dialog.destroy).pack(side="right", padx=(0, 8))
+
+        # grab после отрисовки окна, иначе Tk может отказать («not viewable»)
+        dialog.after(100, dialog.grab_set)
 
     def _select_obsidian_folder(self):
         path = filedialog.askdirectory(initialdir=self.obsidian_path, parent=self)
@@ -252,18 +394,20 @@ class AppUI(ctk.CTk):
         self._on_model_selected(models[0])
 
     def _save_current_settings(self):
-        """Сохраняет выбор пользователя (папка Obsidian, устройства, модель) в settings.json."""
-        speaker_name = self.entry_speaker_name.get().strip() if hasattr(self, "entry_speaker_name") else ""
-        if speaker_name:
-            self._saved_speaker_name = speaker_name
-            if self.worker is not None:
-                self.worker.speaker_self_name = speaker_name
+        """Сохраняет выбор пользователя (папка Obsidian, устройства, модель, промпты, имя)."""
         save_settings(
+            clear_keys=[
+                key for key, value in (("whisper_initial_prompt", self._saved_whisper_prompt),
+                                       ("summary_domain_context", self._saved_summary_context))
+                if not value
+            ],
             obsidian_path=self.obsidian_path,
             mic_device=self._saved_mic,
             loopback_device=self._saved_loopback,
             ollama_model=self._saved_ollama_model,
             speaker_self_name=self._saved_speaker_name,
+            whisper_initial_prompt=self._saved_whisper_prompt or "",
+            summary_domain_context=self._saved_summary_context or "",
         )
 
     def _on_close(self):

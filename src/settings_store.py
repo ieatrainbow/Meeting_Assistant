@@ -17,6 +17,8 @@ DEFAULTS = {
     "loopback_device": "",
     "ollama_model": "",
     "speaker_self_name": SPEAKER_SELF_NAME,
+    "whisper_initial_prompt": "",
+    "summary_domain_context": "",
 }
 
 
@@ -38,11 +40,20 @@ def load_settings():
 
 
 def save_settings(**kwargs):
-    """Атомарно обновляет settings.json; неизвестные ключи и пустые значения игнорируются."""
+    """Атомарно обновляет settings.json.
+
+    Пустые значения по умолчанию игнорируются (не затирают сохранённое).
+    Чтобы сбросить настройку к дефолту (пустая строка = значение из
+    config/.env), перечислите её ключи в clear_keys.
+    """
+    clear = set(kwargs.pop("clear_keys", None) or ())
     data = load_settings()
     for key, value in kwargs.items():
         if key in DEFAULTS and isinstance(value, str) and value.strip():
             data[key] = value.strip()
+    for key in clear:
+        if key in DEFAULTS:
+            data[key] = ""
     tmp_path = SETTINGS_FILE + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:

@@ -60,8 +60,14 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
 
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "ru")
-# Подсказка модели для снижения галлюцинаций на тишине
-WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Запись встречи на русском языке.")
+# Подсказка модели (initial_prompt, до ~224 токенов): снижает галлюцинации
+# на тишине и улучшает распознавание доменных терминов/имён. Настраивается
+# в UI; пустое поле = этот дефолт.
+WHISPER_INITIAL_PROMPT = os.getenv(
+    "WHISPER_INITIAL_PROMPT",
+    "Совещание IT-компании на русском языке: спринт, релиз, деплой, ревью, "
+    "бэклог, API, база данных, тестирование, Jira.",
+)
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # VAD (Silero): отрезание тишины/шума — main источник галлюцинаций
 WHISPER_VAD_MIN_SILENCE_MS = int(os.getenv("WHISPER_VAD_MIN_SILENCE_MS", "500"))
@@ -79,6 +85,23 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 # Таймауты HTTP-запросов, сек
 OLLAMA_WARMUP_TIMEOUT = int(os.getenv("OLLAMA_WARMUP_TIMEOUT", "60"))
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+
+# Общая тема встреч для промпта саммари (настраивается в UI). Пустая строка —
+# не добавлять контекст домена в промпт.
+SUMMARY_DOMAIN_CONTEXT = os.getenv(
+    "SUMMARY_DOMAIN_CONTEXT",
+    "Рабочие созвоны в IT-компании: разработка, спринты, релизы, разбор задач.",
+)
+# Лимит описания встречи из календаря в промпте саммари (символы): длинные
+# описания (agenda, таблицы rich text) вытесняют транскрипт из контекста num_ctx
+SUMMARY_CONTEXT_MAX_CHARS = int(os.getenv("SUMMARY_CONTEXT_MAX_CHARS", "2000"))
+# Лимиты ввода промптов в UI (окно редактирования). Whisper: initial_prompt
+# кондиционирует ~224 токена, для кириллицы это ~400 символов; контекст домена
+# саммари — одна вводная строка, чуть длиннее можно
+WHISPER_PROMPT_MAX_CHARS = int(os.getenv("WHISPER_PROMPT_MAX_CHARS", "400"))
+SUMMARY_DOMAIN_MAX_CHARS = int(os.getenv("SUMMARY_DOMAIN_MAX_CHARS", "600"))
+# Лимит ввода имени владельца микрофона в транскрипте
+SPEAKER_NAME_MAX_CHARS = int(os.getenv("SPEAKER_NAME_MAX_CHARS", "60"))
 
 # Шаблон промпта саммари. Плейсхолдеры: {subject}, {context}, {transcript}.
 # При переопределении в .env не используйте одиночные '{' вне плейсхолдеров.

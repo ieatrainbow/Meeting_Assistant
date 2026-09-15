@@ -63,8 +63,16 @@ class TestSettingsStore(unittest.TestCase):
         save_settings(loopback_device="Speakers")
         self.assertEqual(
             sorted(load_settings()),
-            ["loopback_device", "mic_device", "obsidian_path", "ollama_model", "speaker_self_name"],
+            ["loopback_device", "mic_device", "obsidian_path", "ollama_model",
+             "speaker_self_name", "summary_domain_context", "whisper_initial_prompt"],
         )
+
+    def test_clear_keys_resets_to_default(self):
+        """clear_keys сбрасывает настройку к дефолту (пустая строка = config/.env)."""
+        save_settings(whisper_initial_prompt="Кастом")
+        save_settings(clear_keys=["whisper_initial_prompt"])
+        data = load_settings()
+        self.assertEqual(data["whisper_initial_prompt"], "")
 
     def test_corrupt_file_returns_defaults(self):
         """Битый JSON не роняет запуск — возвращаются дефолты."""
