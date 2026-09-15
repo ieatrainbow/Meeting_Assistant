@@ -18,6 +18,7 @@ for path in (SRC_DIR, BASE_DIR):
 import config
 from worker import transliterate, WorkerDaemon
 from recorder import AudioRecorder
+from outlook_client import clean_meeting_body
 
 
 class TestTransliteration(unittest.TestCase):
@@ -34,6 +35,46 @@ class TestTransliteration(unittest.TestCase):
     def test_mixed_text(self):
         """Проверка обработки смешанного англо-русского текста с дефисами."""
         self.assertEqual(transliterate("Meeting 123 - Важно"), "Meeting_123_-_Vazhno")
+
+
+class TestCleanMeetingBody(unittest.TestCase):
+    """Нормализация описания встречи из Outlook для заметки."""
+
+    def test_collapses_table_columns(self):
+        """Таблица, развёрнутая пробелами, сжимается в читаемые строки."""
+        table = (
+            "Name        Status      Comment\r\n"
+            "-----       ----------  ---------------\r\n"
+            "Ivan        done        ok\r\n"
+            "Petr        in progress waiting"
+        )
+        expected = (
+            "Name Status Comment\n"
+            "Ivan done ok\n"
+            "Petr in progress waiting"
+        )
+        self.assertEqual(clean_meeting_body(table), expected)
+
+    def test_drops_table_borders(self):
+        """Строки-разделители таблиц (---, +----+, ___) удаляются."""
+        body = "Заголовок\n+----+----+\nIvan | ok\n----\nИтог"
+        self.assertEqual(clean_meeting_body(body), "Заголовок\nIvan | ok\nИтог")
+
+    def test_normalizes_blank_lines_and_edges(self):
+        """CRLF, nbsp, табы и цепочки пустых строк нормализуются."""
+        body = "\r\n\r\nАбзац один.\n\n\n\nАбзац\u00a0два.\tТаб.\n\n\n\n"
+        self.assertEqual(clean_meeting_body(body), "Абзац один.\n\nАбзац два. Таб.")
+
+    def test_keeps_single_spaces_and_urls(self):
+        """Одиночные пробелы и ссылки не трогаются."""
+        body = "Ссылка: https://telemost.yandex.ru/j/123\nНе меняется."
+        self.assertEqual(clean_meeting_body(body), body)
+
+    def test_empty_and_none(self):
+        """None и пустые строки дают пустой результат."""
+        self.assertEqual(clean_meeting_body(None), "")
+        self.assertEqual(clean_meeting_body(""), "")
+        self.assertEqual(clean_meeting_body("   \n  "), "")
 
 
 class TestAudioRecorder(unittest.TestCase):
@@ -160,6 +201,136 @@ class TestOutlookIntegration(unittest.TestCase):
         result = get_current_or_next_meeting_details()
 
         self.assertIsNone(result)
+
+
+class _FakeAppointment:
+    """Минимальный мок AppointmentItem: tz-aware UTC Start/End как в раннем биндинге."""
+
+    def __init__(self, subject, start_utc, end_utc):
+        self.Subject = subject
+        self.Start = start_utc
+        self.End = end_utc
+        self.MeetingStatus = 1  # olMeeting — не отменена
+        self.Recipients = []
+        self.Organizer = "Organizer"
+        self.Body = "body"
+
+
+class _FakeItems:
+    """Мок Items: Restrict возвращает все элементы (фильтрацию эмулирует код outlook_client)."""
+
+    def __init__(self, appointments):
+        self._items = appointments
+
+    def Sort(self, *_a, **_k):
+        pass
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def Restrict(self, _restriction):
+        return _FakeItems(self._items)
+
+
+class _FakeCalendar:
+    def __init__(self, appointments):
+        self.Items = _FakeItems(appointments)
+
+
+class _FakeNamespace:
+    def __init__(self, calendar):
+        self._calendar = calendar
+
+    def GetDefaultFolder(self, _folder_id):
+        return self._calendar
+
+
+class TestOutlookCurrentMeeting(unittest.TestCase):
+    """Приоритет идущей сейчас встречи над следующей."""
+
+    def _fake_dispatch(self, appointments):
+        dispatch = MagicMock()
+        dispatch.GetNamespace.return_value = _FakeNamespace(_FakeCalendar(appointments))
+        return dispatch
+
+    @patch("win32com.client.Dispatch")
+    def test_current_meeting_preferred_over_next(self, mock_dispatch):
+        """Встреча уже началась и не закончена -> берутся её данные, а не следующей."""
+        from datetime import datetime, timedelta, timezone
+
+        from outlook_client import get_current_or_next_meeting_details
+
+        now_utc = datetime.now(timezone.utc)
+        current = _FakeAppointment(
+            "Текущая встреча",
+            now_utc - timedelta(minutes=15),
+            now_utc + timedelta(minutes=45),
+        )
+        upcoming = _FakeAppointment(
+            "Следующая встреча",
+            now_utc + timedelta(hours=1),
+            now_utc + timedelta(hours=2),
+        )
+        mock_dispatch.return_value = self._fake_dispatch([current, upcoming])
+
+        result = get_current_or_next_meeting_details()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["subject"], "Текущая встреча")
+
+    @patch("win32com.client.Dispatch")
+    def test_next_meeting_when_none_running(self, mock_dispatch):
+        """Идущих встреч нет -> возвращается ближайшая будущая."""
+        from datetime import datetime, timedelta, timezone
+
+        from outlook_client import get_current_or_next_meeting_details
+
+        now_utc = datetime.now(timezone.utc)
+        later = _FakeAppointment(
+            "Поздняя встреча",
+            now_utc + timedelta(hours=3),
+            now_utc + timedelta(hours=4),
+        )
+        sooner = _FakeAppointment(
+            "Ближайшая встреча",
+            now_utc + timedelta(hours=1),
+            now_utc + timedelta(hours=2),
+        )
+        mock_dispatch.return_value = self._fake_dispatch([later, sooner])
+
+        result = get_current_or_next_meeting_details()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["subject"], "Ближайшая встреча")
+
+    @patch("win32com.client.Dispatch")
+    def test_canceled_current_not_selected(self, mock_dispatch):
+        """Отменённая встреча, идущая по времени, не должна выбираться."""
+        from datetime import datetime, timedelta, timezone
+
+        from outlook_client import get_current_or_next_meeting_details
+
+        now_utc = datetime.now(timezone.utc)
+        canceled = _FakeAppointment(
+            "Canceled: Текущая",
+            now_utc - timedelta(minutes=15),
+            now_utc + timedelta(minutes=45),
+        )
+        canceled.MeetingStatus = 5  # olMeetingCanceled
+        upcoming = _FakeAppointment(
+            "Следующая встреча",
+            now_utc + timedelta(hours=1),
+            now_utc + timedelta(hours=2),
+        )
+        mock_dispatch.return_value = self._fake_dispatch([canceled, upcoming])
+
+        result = get_current_or_next_meeting_details()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["subject"], "Следующая встреча")
 
 
 if __name__ == "__main__":

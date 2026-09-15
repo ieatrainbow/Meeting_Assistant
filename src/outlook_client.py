@@ -1,5 +1,6 @@
 import datetime
 import os
+import re
 import sys
 import time
 
@@ -66,10 +67,105 @@ def _to_utc_iso(dt):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.mktime(dt.timetuple())))
 
 
+# Строки-разделители таблиц/подчёркивания из ASCII-графики: "---", "___",
+# "+----+----+", "***", "..." и т.п. (3+ символов, ничего кроме этих знаков).
+_TABLE_BORDER_RE = re.compile(r"^[\s\-=_+*.~]{3,}$")
+
+
+def clean_meeting_body(text):
+    """Нормализует описание встречи из Outlook для заметки.
+
+    AppointmentItem.Body — plain text: таблицы из rich text разворачиваются
+    в колонки, выровненные цепочками пробелов, плюс CRLF и неразрывные
+    пробелы. Из-за этого текст в заметке «плывёт». Здесь: убираем
+    выравнивающие пробелы, строки-разделители таблиц и лишние пустые строки.
+    """
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00a0", " ").replace("\t", " ")
+
+    lines = []
+    for raw in text.split("\n"):
+        # Цепочки 2+ пробелов — это выравнивание колонок таблицы: сжимаем.
+        line = re.sub(r" {2,}", " ", raw).strip()
+        if _TABLE_BORDER_RE.match(raw):
+            continue
+        lines.append(line)
+
+    # Максимум одна пустая строка подряд, без пустот по краям.
+    out = []
+    for line in lines:
+        if line == "" and (not out or out[-1] == ""):
+            continue
+        out.append(line)
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out)
+
+def _query_current_meeting(items, now_local, log=None):
+    """Отдельный запрос идущей сейчас встречи: [Start] <= now < [End].
+
+    Общий фильтр по окну поиска может не вернуть вхождение, которое уже
+    началось (особенности Restrict/IncludeRecurrences для серий), поэтому
+    текущая встреча запрашивается явно. Возвращает список активных элементов.
+    """
+    log = log or (lambda *a, **k: None)
+    val_utc = _to_utc_iso(now_local)
+    val_local = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    variants = [
+        (
+            "@SQL=\"urn:schemas:calendar:dtstart\" <= '{}' AND "
+            "\"urn:schemas:calendar:dtend\" > '{}'".format(val_utc, val_utc),
+            "DASL/UTC",
+        ),
+        (
+            "@SQL=\"urn:schemas:calendar:dtstart\" <= '{}' AND "
+            "\"urn:schemas:calendar:dtend\" > '{}'".format(val_local, val_local),
+            "DASL/local",
+        ),
+    ]
+    for fmt in ("%d.%m.%Y %H:%M", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M"):
+        val = now_local.strftime(fmt)
+        variants.append((f"[Start] <= '{val}' AND [End] > '{val}'", f"Jet/{fmt}"))
+
+    for restriction, label in variants:
+        try:
+            res = items.Restrict(restriction)
+            cands = []
+            for item in res:
+                cands.append(item)
+                if len(cands) >= 50:
+                    break
+            if not cands:
+                continue
+            active = []
+            for item in cands:
+                try:
+                    status = getattr(item, "MeetingStatus", 0) or 0
+                    subj = (item.Subject or "").strip().lower()
+                    if status == 5 or subj.startswith(
+                        ("canceled:", "cancelled:", "отменено:", "отменена:", "отменён:", "отмена:")
+                    ):
+                        continue
+                    if _naive(item.Start) <= now_local < _naive(item.End):
+                        active.append(item)
+                except Exception:
+                    continue
+            log(f"[Outlook] Current query ({label}): raw={len(cands)}, active={len(active)}")
+            if active:
+                return active
+        except Exception as e:
+            log(f"[Outlook Warning] Current query ({label}) failed: {e}")
+    return []
+
+
 def get_current_or_next_meeting_details(log_callback=None):
     """
     Ищет текущую или ближайшую встречу в Outlook (включая повторяющиеся серии).
-    Порядок попыток: DASL/UTC (locale-независимый) -> Jet Restrict -> обратный проход.
+    Приоритет: встреча, которая уже началась и ещё не закончена ([Start] <= now < [End])
+    — запрашивается отдельным Restrict, т.к. общий фильтр по окну может её терять.
+    Порядок попыток: текущая -> DASL/UTC (locale-независимый) -> Jet Restrict -> обратный проход.
     """
     log = log_callback or print
     try:
@@ -90,69 +186,56 @@ def get_current_or_next_meeting_details(log_callback=None):
 
         log(f"[Outlook] Search window: {search_start:%Y-%m-%d %H:%M} .. {search_end:%Y-%m-%d %H:%M}")
 
-        matched_items = []
+        # Сбор кандидатов из нескольких источников с объединением (dedupe).
+        # На этой сборке Outlook DASL/UTC возвращает пусто, а DASL/local с
+        # условиями на двух свойствах (dtstart+dtend) молча теряет часть
+        # вхождений (проверено зондом: нашёл 4 из 5, ближайшая пропала).
+        # Поэтому объединяем результаты DASL и всех Jet-форматов: мусор
+        # нераспарсенных форматов отбраковывается финальной валидацией по окну.
+        collected = {}
 
-        # Попытка 1: DASL — не зависит от региональных форматов даты,
-        # корректно разворачивает повторяющиеся встречи (Sort + IncludeRecurrences).
-        # Пробуем UTC ('...Z') и локальный ISO: поведение зависит от версии Outlook.
-        for dasl_label, val_end, val_start in (
-            ("UTC", _to_utc_iso(search_end), _to_utc_iso(search_start)),
-            ("local", search_end.strftime("%Y-%m-%d %H:%M:%S"), search_start.strftime("%Y-%m-%d %H:%M:%S")),
-        ):
+        def _collect(source_label, restriction):
             try:
-                restriction = (
-                    '@SQL="urn:schemas:calendar:dtstart" < \'{}\' AND '
-                    '"urn:schemas:calendar:dtend" > \'{}\''.format(val_end, val_start)
-                )
                 res = items.Restrict(restriction)
-                cands = []
+                added = 0
                 for item in res:
-                    cands.append(item)
-                    if len(cands) >= 50:
-                        break
-                log(f"[Outlook] DASL filter ({dasl_label}): {len(cands)} candidates")
-                if cands:
-                    valid, _st = _validate_candidates(cands, search_start, search_end)
-                    if valid:
-                        matched_items = valid
-                        break
-                    log("[Outlook Warning] DASL candidates failed validation")
-            except Exception as e:
-                log(f"[Outlook Warning] DASL filter ({dasl_label}) failed: {e}")
-
-        # Попытка 2: Jet Restrict с перебором региональных форматов даты.
-        # Формат принимается, только если валидация оставила >= 1 кандидата —
-        # защита от неверного парсинга даты в не-US локалях.
-        if not matched_items:
-            date_formats = ["%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"]
-            for fmt in date_formats:
-                try:
-                    start_str = search_start.strftime(fmt)
-                    end_str = search_end.strftime(fmt)
-                    restriction = f"[Start] >= '{start_str}' AND [Start] <= '{end_str}'"
-                    res = items.Restrict(restriction)
-                    if res.Count <= 0:
-                        continue
-                    cands = []
-                    for item in res:
-                        cands.append(item)
-                        if len(cands) >= 200:
-                            break
                     try:
-                        log(f"[Outlook] Jet sample start: {cands[0].Start!r}")
+                        key = (str(item.Subject or ""), str(_naive(item.Start)), str(_naive(item.End)))
                     except Exception:
-                        pass
-                    valid, stats = _validate_candidates(cands, search_start, search_end)
-                    log(f"[Outlook] Jet filter ({fmt}): raw={len(cands)}, valid={len(valid)} "
-                        f"(future={stats['future']}, ended_past={stats['ended']})")
-                    if valid:
-                        matched_items = valid
+                        key = (f"opaque-{len(collected)}-{added}",)
+                    if key not in collected:
+                        collected[key] = item
+                        added += 1
+                    if len(collected) >= 200:
                         break
-                except Exception:
-                    continue
+                log(f"[Outlook] Restrict ({source_label}): +{added}, total unique={len(collected)}")
+            except Exception as e:
+                log(f"[Outlook Warning] Restrict ({source_label}) failed: {e}")
 
-        # Попытка 3: обратный проход с конца отсортированной коллекции.
-        # Обрабатывает только разовые встречи; вхождения серий покрыты попытками 1-2.
+        # DASL: перекрытие окна (dtstart < end AND dtend > start) — ловит и
+        # идущие сейчас, начавшиеся до search_start. UTC и локальный варианты.
+        for dasl_label, val_end, val_start in (
+            ("DASL/UTC", _to_utc_iso(search_end), _to_utc_iso(search_start)),
+            ("DASL/local", search_end.strftime("%Y-%m-%d %H:%M:%S"), search_start.strftime("%Y-%m-%d %H:%M:%S")),
+        ):
+            _collect(
+                dasl_label,
+                '@SQL="urn:schemas:calendar:dtstart" < \'{}\' AND '
+                '"urn:schemas:calendar:dtend" > \'{}\''.format(val_end, val_start),
+            )
+
+        # Jet: перебор региональных форматов, start-in-window. На этой сборке
+        # даёт полный корректный набор (проверено зондом: 5 из 5).
+        for fmt in ("%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"):
+            _collect(
+                f"Jet/{fmt}",
+                f"[Start] >= '{search_start.strftime(fmt)}' AND [Start] <= '{search_end.strftime(fmt)}'",
+            )
+
+        matched_items = list(collected.values())
+
+        # Попытка 3 (если Restrict ничего не дал): обратный проход с конца
+        # отсортированной коллекции. Обрабатывает только разовые встречи.
         if not matched_items:
             try:
                 items.IncludeRecurrences = False  # конечная коллекция для обратного прохода
@@ -178,6 +261,11 @@ def get_current_or_next_meeting_details(log_callback=None):
                 except Exception:
                     continue
             log(f"[Outlook] Backward scan: {len(matched_items)} candidates")
+            # Возвращаем режим разворачивания серий — он нужен current-запросу ниже.
+            try:
+                items.IncludeRecurrences = True
+            except Exception:
+                pass
 
         # Финальная валидация + диагностика причин отбраковки
         if matched_items:
@@ -191,6 +279,14 @@ def get_current_or_next_meeting_details(log_callback=None):
                         _naive(i.Start).strftime("%Y-%m-%d %H:%M") for i in matched_items[:5]))
                 except Exception:
                     pass
+
+        # Приоритет: идущая сейчас встреча (уже началась и ещё не закончена).
+        # Общий фильтр по окну может терять активное вхождение — запрашиваем
+        # её отдельно; если найдена, она заменяет всех кандидатов из окна.
+        current_items = _query_current_meeting(items, now_local, log)
+        if current_items:
+            log(f"[Outlook] Current meeting overrides candidates: {len(current_items)} active")
+            matched_items = current_items
 
         if not matched_items:
             log(f"[Outlook] No meetings found in window {search_start:%Y-%m-%d %H:%M} .. {search_end:%Y-%m-%d %H:%M}")
@@ -233,19 +329,24 @@ def get_current_or_next_meeting_details(log_callback=None):
         except Exception:
             pass
 
-        # Извлечение описания встречи
+        # Извлечение описания встречи (с нормализацией таблиц/пробелов)
         body = ""
         try:
-            body = best_item.Body.strip() if best_item.Body else ""
+            body = clean_meeting_body(best_item.Body)
         except Exception:
-            pass
+            try:
+                body = (best_item.Body or "").strip()
+            except Exception:
+                pass
 
         return {
             "subject": best_item.Subject,
             "organizer": organizer,
             "attendees": attendees,
             "body": body,
-            "start": str(best_item.Start)
+            # Локальное naive-время: str(Start) у pywintypes даёт UTC и в UI
+            # отображается со сдвигом относительно календаря Outlook.
+            "start": str(_naive(best_item.Start)),
         }
 
     except Exception as e:
